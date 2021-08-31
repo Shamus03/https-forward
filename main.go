@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 )
@@ -57,17 +58,42 @@ func main() {
 		log.Fatalf("could not read config: %v", err)
 	}
 
+	reloadConfig := func() {
+		err := config.Read(*flagConfig)
+		if err != nil {
+			log.Printf("could not read config: %v", err)
+		}
+	}
+
 	// listen to SIGHUP for config changes
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGHUP)
 	go func() {
 		for range c {
-			err := config.Read(*flagConfig)
-			if err != nil {
-				log.Fatalf("could not read config: %v", err)
+			reloadConfig()
+		}
+	}()
+
+	// watch file changes
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatalf("set up watcher: %v", err)
+	}
+	defer watcher.Close()
+	go func() {
+		for {
+			select {
+			case event := <-watcher.Events:
+				fmt.Printf("config file changed: %v\n", event)
+				reloadConfig()
+			case err := <-watcher.Errors:
+				fmt.Printf("config file watch error: %v\n", err)
 			}
 		}
 	}()
+	if err := watcher.Add(*flagConfig); err != nil {
+		log.Fatalf("failed to watch config file: %v", err)
+	}
 
 	hostPolicy := func(c context.Context, host string) error {
 		if _, ok := config.For(host); !ok {
