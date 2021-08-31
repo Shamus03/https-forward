@@ -4,6 +4,7 @@ go 1.17
 
 require (
 	github.com/fsnotify/fsnotify v1.5.1
+	github.com/kardianos/service v1.2.0
 	golang.org/x/crypto v0.0.0-20200728195943-123391ffb6de
 )
 

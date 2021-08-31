@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/kardianos/service"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 )
@@ -27,11 +28,13 @@ const (
 	forwardedFor = "X-Forwarded-For"
 )
 
+var (
+	flagConfig *string
+	flagCache  *string
+)
+
 func main() {
-	var (
-		flagConfig *string
-		flagCache  *string
-	)
+	svcFlag := flag.String("service", "", "Control the system service.")
 
 	// configure flagConfig, in snap use common across revisions
 	if snapCommon := os.Getenv("SNAP_COMMON"); snapCommon != "" {
@@ -50,7 +53,52 @@ func main() {
 	}
 
 	flag.Parse()
-	log.Printf("config=%v, cache=%v", *flagConfig, *flagCache)
+
+	svcConfig := &service.Config{
+		Name:        "https-forward",
+		DisplayName: "https-forward",
+		Description: "external https reverse-proxy",
+		Arguments: []string{
+			"--config", "/Apps/https-forward/config",
+		},
+	}
+
+	prg := &program{}
+	s, err := service.New(prg, svcConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	logger, err = s.Logger(nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if len(*svcFlag) != 0 {
+		err := service.Control(s, *svcFlag)
+		if err != nil {
+			logger.Infof("Valid actions: %q\n", service.ControlAction)
+			log.Fatal(err)
+		}
+		return
+	}
+
+	if err = s.Run(); err != nil {
+		logger.Error(err)
+	}
+}
+
+var logger service.Logger
+
+type program struct{}
+
+func (p *program) Start(s service.Service) error {
+	// Start should not block. Do the actual work async.
+	go p.run()
+	return nil
+}
+
+func (p *program) run() {
+	logger.Infof("config=%v, cache=%v", *flagConfig, *flagCache)
 
 	config := &configHolder{config: make(map[string]hostConfig)}
 	err := config.Read(*flagConfig)
@@ -61,7 +109,7 @@ func main() {
 	reloadConfig := func() {
 		err := config.Read(*flagConfig)
 		if err != nil {
-			log.Printf("could not read config: %v", err)
+			logger.Infof("could not read config: %v", err)
 		}
 	}
 
@@ -77,22 +125,26 @@ func main() {
 	// watch file changes
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		log.Fatalf("set up watcher: %v", err)
+		logger.Errorf("set up watcher: %v", err)
+		return
 	}
 	defer watcher.Close()
 	go func() {
 		for {
 			select {
 			case event := <-watcher.Events:
-				fmt.Printf("config file changed: %v\n", event)
+				logger.Infof("config file changed: %v\n", event)
 				reloadConfig()
 			case err := <-watcher.Errors:
-				fmt.Printf("config file watch error: %v\n", err)
+				logger.Infof("config file watch error: %v\n", err)
+			default:
+				return
 			}
 		}
 	}()
 	if err := watcher.Add(*flagConfig); err != nil {
-		log.Fatalf("failed to watch config file: %v", err)
+		logger.Errorf("failed to watch config file: %v", err)
+		return
 	}
 
 	hostPolicy := func(c context.Context, host string) error {
@@ -160,11 +212,29 @@ func main() {
 		},
 	}
 
+	die := make(chan struct{})
+
 	go func() {
-		log.Fatal(http.ListenAndServe(":http", http.HandlerFunc(handleRedirect)))
+		if err := http.ListenAndServe(":http", http.HandlerFunc(handleRedirect)); err != nil && err != http.ErrServerClosed {
+			logger.Errorf("http.ListenAndServe: %v", err)
+		}
+		close(die)
 	}()
 
-	log.Fatal(server.ListenAndServeTLS("", ""))
+	go func() {
+		if err := server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			logger.Errorf("server.ListenAndServeTLS: %v", err)
+			return
+		}
+		close(die)
+	}()
+
+	<-die
+}
+
+func (p *program) Stop(s service.Service) error {
+	// Stop should not block. Return with a few seconds.
+	return nil
 }
 
 func handleRedirect(w http.ResponseWriter, r *http.Request) {
