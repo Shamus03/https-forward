@@ -107,9 +107,10 @@ func (p *program) run() {
 	}
 
 	reloadConfig := func() {
+		logger.Info("reloading config")
 		err := config.Read(*flagConfig)
 		if err != nil {
-			logger.Infof("could not read config: %v", err)
+			logger.Errorf("could not read config: %v", err)
 		}
 	}
 
@@ -136,7 +137,7 @@ func (p *program) run() {
 				logger.Infof("config file changed: %v\n", event)
 				reloadConfig()
 			case err := <-watcher.Errors:
-				logger.Infof("config file watch error: %v\n", err)
+				logger.Errorf("config file watch error: %v\n", err)
 			default:
 				return
 			}
